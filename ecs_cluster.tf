@@ -1,71 +1,87 @@
-# ECS Cluster
-resource "aws_ecs_cluster" "app_cluster" {
-  name = "app-cluster"
+resource "aws_ecs_cluster" "wordpress_cluster" {
+  name = "wordpress-cluster"
 }
 
-# ECS Task Definition
-resource "aws_ecs_task_definition" "app" {
-  family                   = "app-task"
+resource "aws_iam_role" "ecs_task_execution_role" {
+  name = "ecsTaskExecutionRole"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_policy" {
+  role       = aws_iam_role.ecs_task_execution_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+resource "aws_ecs_task_definition" "wordpress" {
+  family                   = "wordpress-task"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
   cpu                      = "256"
   memory                   = "512"
-  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
 
   container_definitions = jsonencode([
     {
-      name  = "app"
-      image = "nginx:latest"
+      name      = "wordpress"
+      image     = "wordpress:latest"
       essential = true
-      portMappings = [{
-        containerPort = 80
-        hostPort      = 80
-      }]
+      portMappings = [
+        {
+          containerPort = 80
+          hostPort      = 80
+        }
+      ]
+      environment = [
+        {
+          name  = "WORDPRESS_DB_HOST"
+          value = aws_db_instance.default.endpoint
+        },
+        {
+          name  = "WORDPRESS_DB_NAME"
+          value = var.db_name
+        },
+        {
+          name  = "WORDPRESS_DB_USER"
+          value = var.db_user
+        },
+        {
+          name  = "WORDPRESS_DB_PASSWORD"
+          value = var.db_password
+        }
+      ]
     }
   ])
+
+  execution_role_arn = aws_iam_role.ecs_task_execution_role.arn
+  task_role_arn      = aws_iam_role.ecs_task_execution_role.arn
 }
 
-# ECS Service
-resource "aws_ecs_service" "app_service" {
-  name            = "app-service"
-  cluster         = aws_ecs_cluster.app_cluster.id
-  task_definition = aws_ecs_task_definition.app.arn
-  desired_count   = 2
+resource "aws_ecs_service" "wordpress" {
+  name            = "wordpress-service"
+  cluster         = aws_ecs_cluster.wordpress_cluster.id
+  task_definition = aws_ecs_task_definition.wordpress.arn
+  desired_count   = 1
   launch_type     = "FARGATE"
-
   network_configuration {
-    subnets         = [aws_subnet.private_subnet_1.id, aws_subnet.private_subnet_2.id]
-    security_groups = [aws_security_group.ecs_sg.id]
+    subnets          = aws_subnet.public[*].id
+    security_groups  = [aws_security_group.alb_sg.id]
+    assign_public_ip = true
   }
-
   load_balancer {
-    target_group_arn = aws_lb_target_group.app_tg.arn
-    container_name   = "app"
+    target_group_arn = aws_lb_target_group.this.arn
+    container_name   = "wordpress"
     container_port   = 80
   }
-}
-
-# RDS Subnet Group
-resource "aws_db_subnet_group" "main" {
-  name       = "main-subnet-group"
-  subnet_ids = [aws_subnet.private_subnet_1.id, aws_subnet.private_subnet_2.id]
-}
-
-# RDS Security Group
-resource "aws_security_group" "rds_sg" {
-  vpc_id = aws_vpc.main.id
-
-  ingress {
-    from_port   = 3306
-    to_port     = 3306
-    protocol    = "tcp"
-    security_groups = [aws_security_group.ecs_sg.id]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  depends_on = [aws_lb_listener.http]
 }
